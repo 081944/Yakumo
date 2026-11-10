@@ -63,6 +63,11 @@ overlay_*.bin
 
 # Editor and agent tooling
 .claude/
+/.workbuddy-ai/
+
+# Local toolchains, SDKs, extracted dependencies and packaging helpers
+# These are machine-specific and may contain large binaries or signing inputs.
+/toolchain/
 
 # Developer-local devices, addresses and test paths
 /LOCAL_TESTING.md
