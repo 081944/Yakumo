@@ -133,6 +133,7 @@ public final class SecondaryScreen {
         private int selectedSlot = -1;
         private final SecondaryItemList itemList = new SecondaryItemList();
         private float rowStride, columnStride, cellWidth, cellHeight;
+        private float cellGap;
         private float downX, downY, lastY;
         private boolean dragging, listGesture;
         private int touchPointer = -1, pressedAction = Integer.MIN_VALUE;
@@ -277,20 +278,22 @@ public final class SecondaryScreen {
         protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w, h, oldw, oldh);
             float pad = h * 0.035f;
-            float mapW = w * 0.60f - pad * 1.5f;
-            float shortcutGap = pad * 0.45f;
-            float shortcutHeight = Math.max(h * 0.12f, pad * 1.5f);
-            float mapBottom = h - pad - shortcutGap - shortcutHeight;
-            mapPanel.set(pad, pad * 0.65f, pad + mapW, mapBottom);
-            itemShortcuts.set(pad, mapBottom + shortcutGap, pad + mapW, h - pad);
-            float left = mapPanel.right + pad;
+            cellGap = Math.max(4f, w * 0.018f);
+            cellWidth = (w - pad * 3f - cellGap * 3f) / 5f;
+            float mapW = cellWidth * 3f + cellGap * 2f;
+            float mapTop = pad * 0.65f;
+            float left = pad + mapW + pad;
             float right = w - pad;
-            float gap = (right - left) * 0.05f;
+            itemViewport.set(left, mapTop, right, h - pad);
+            cellHeight = (itemViewport.height() - cellGap * 4f) / 5f;
+            float mapBottom = h - pad - cellGap - cellHeight;
+            mapPanel.set(pad, mapTop, pad + mapW, mapBottom);
+            itemShortcuts.set(pad, mapBottom + cellGap, pad + mapW, h - pad);
+            left = mapPanel.right + pad;
+            right = w - pad;
             itemViewport.set(left, mapPanel.top, right, h - pad);
-            cellWidth = (itemViewport.width() - gap) / 2f;
-            cellHeight = (itemViewport.height() - gap * 4f) / 5f;
-            columnStride = cellWidth + gap;
-            rowStride = cellHeight + gap;
+            columnStride = cellWidth + cellGap;
+            rowStride = cellHeight + cellGap;
             updateSlotBounds();
         }
 
@@ -356,8 +359,8 @@ public final class SecondaryScreen {
                     shortcutItemSlots[shortcut++] = slot;
                 }
             }
-            float gap = itemShortcuts.width() * 0.035f;
-            float width = (itemShortcuts.width() - gap * 2f) / shortcutButtons.length;
+            float gap = cellGap;
+            float width = cellWidth;
             for (int i = 0; i < shortcutButtons.length; ++i) {
                 RectF button = shortcutButtons[i];
                 float left = itemShortcuts.left + i * (width + gap);
