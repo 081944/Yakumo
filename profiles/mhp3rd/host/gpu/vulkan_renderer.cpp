@@ -4,6 +4,7 @@
 #include "frame_interpolation.hpp"
 #include "frame_pacing.hpp"
 #include "game_hud.hpp"
+#include "secondary_map_policy.hpp"
 #include "replacement_textures.hpp"
 #include "mmpx.hpp"
 #include "coarse_shading.hpp"
@@ -34,6 +35,7 @@
 #include "platform/android_display.hpp"
 #include "platform/android_fatal.hpp"
 #include "platform/android_jni.hpp"
+#include "platform/android_secondary_screen.hpp"
 #endif
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
@@ -1418,6 +1420,17 @@ struct VulkanRenderer::Impl {
     VkDeviceMemory capture_memory{};
     VkExtent2D capture_extent{};
     bool capture_recorded{};
+#if defined(MHP3RD_ANDROID_APP)
+    // The lower screen's map: the block of the game picture the map is drawn
+    // into, copied out for SecondaryScreen.java. Read without waiting, so a
+    // frame that is not ready yet simply keeps the image already shown.
+    VkBuffer map_buffer{};
+    VkDeviceMemory map_memory{};
+    VkDeviceSize map_buffer_bytes{};
+    VkExtent2D map_extent{};
+    bool map_copy_pending{};
+    VkFence map_copy_fence{};
+#endif
     // MHP3RD_CAPTURE_PRESENTS=N: a window capture goes on for N presents in
     // a row (NAME_1.bmp and so on), frames in between the game's included.
     std::filesystem::path capture_burst_base;
@@ -1954,6 +1967,12 @@ struct VulkanRenderer::Impl {
             valid = false;
         }
     };
+#if defined(MHP3RD_ANDROID_APP)
+    // Only semantic Map draws. Scene geometry and framebuffer pixels never
+    // enter this pass; the lower screen has its own render target.
+    Target secondary_map_target{};
+    std::vector<ReplayGroup> secondary_map_draws;
+#endif
     struct InterpolationStats {
         std::chrono::steady_clock::time_point window_start{std::chrono::steady_clock::now()};
         std::uint32_t frames{};
@@ -2459,6 +2478,18 @@ struct VulkanRenderer::Impl {
     // the game's flips.
     void submit_and_present(VkCommandBuffer commands, VkFence fence, VkImage source, bool game_frame, bool main_frame);
     void write_capture(VkFence fence);
+#if defined(MHP3RD_ANDROID_APP)
+    // The map block of the game picture, in target pixels, for the lower screen.
+    [[nodiscard]] VkRect2D second_screen_map_rect() const;
+    // Replays Map-tagged HUD geometry into an independent target, then reads
+    // its map block. This method has no main-screen image input.
+    void render_second_screen_map(VkCommandBuffer commands);
+    // Hands the copy to the lower screen once its frame has finished. Does not
+    // wait: a frame that is still running leaves the previous map in place.
+    void finish_second_screen_map(VkFence fence);
+    void destroy_second_screen_readback();
+    void destroy_second_screen_map();
+#endif
     void destroy_target(Target &target);
     void run_commands(const std::function<void(VkCommandBuffer)> &record);
     Target *target_for(std::uint32_t address, std::string &error);
@@ -3946,6 +3977,167 @@ void VulkanRenderer::Impl::record_game_blit(VkCommandBuffer commands, VkImage so
     perf::count_target_copy();
 }
 
+#if defined(MHP3RD_ANDROID_APP)
+// The map block of the game picture, in target pixels. The block keeps its
+// place in the 480x272 picture, so the player's own HUD placement is followed
+// and the lower screen shows the map where the game would have drawn it.
+//
+// Under Fill the target has the window's shape rather than the PSP's, and the
+// interface is drawn at fit_x x fit_y about the picture's centre to keep its
+// pixels square. Scaling the 480x272 block by target/480x272 alone would put
+// the copy to the right of the real minimap, so use the same screen_bounds()
+// mapping the touch layouts use.
+VkRect2D VulkanRenderer::Impl::second_screen_map_rect() const {
+    const int width = static_cast<int>(target_extent.width);
+    const int height = static_cast<int>(target_extent.height);
+    if (width <= 1 || height <= 1) return {{0, 0}, {1u, 1u}};
+    const hud::Rect picture{0.f, 0.f, static_cast<float>(width), static_cast<float>(height)};
+    float fit_x = 1.f, fit_y = 1.f;
+    [[maybe_unused]] const bool fitted = interface_fit(fit_x, fit_y);
+    const hud::Rect block = hud::screen_bounds(
+        hud::layout_enabled() ? settings::current().hud : hud::Layout{}, hud::Part::Map, picture, fit_x, fit_y);
+    if (block.right <= block.left || block.bottom <= block.top) return {{0, 0}, {1u, 1u}};
+    const int left = std::clamp(static_cast<int>(std::lround(block.left)), 0, width - 1);
+    const int top = std::clamp(static_cast<int>(std::lround(block.top)), 0, height - 1);
+    const int right = std::clamp(static_cast<int>(std::lround(block.right)), left + 1, width);
+    const int bottom = std::clamp(static_cast<int>(std::lround(block.bottom)), top + 1, height);
+    return {{left, top}, {static_cast<std::uint32_t>(right - left), static_cast<std::uint32_t>(bottom - top)}};
+}
+
+void VulkanRenderer::Impl::render_second_screen_map(VkCommandBuffer commands) {
+    if (!android::second_screen_wanted()) return;
+    static const bool disabled = std::getenv("MHP3RD_NO_SECONDARY_MAP") != nullptr;
+    if (disabled) {
+        android::clear_second_screen_map();
+        return;
+    }
+    if (map_copy_pending) {
+        finish_second_screen_map(map_copy_fence);
+        if (map_copy_pending) return;
+    }
+    const auto update = secondary_map::update(
+        game::control_context::current().scene == game::control_context::Scene::Quest,
+        true, !secondary_map_draws.empty());
+    if (update == secondary_map::Update::Hold) return;
+    if (update == secondary_map::Update::Clear) {
+        map_copy_pending = false;
+        android::clear_second_screen_map();
+        return;
+    }
+    std::string error;
+    if (secondary_map_target.color == VK_NULL_HANDLE && !create_target(secondary_map_target, error)) {
+        std::cout << "[secondary-map] target unavailable: " << error << std::endl;
+        destroy_target(secondary_map_target);
+        secondary_map_target = {};
+        return;
+    }
+    if (secondary_map_target.initialized)
+        transition(commands, secondary_map_target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    else
+        initialize_layouts(commands, secondary_map_target);
+    VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    pass.renderPass = render_pass;
+    pass.framebuffer = secondary_map_target.framebuffer;
+    pass.renderArea = {{0, 0}, target_extent};
+    vkCmdBeginRenderPass(commands, &pass, VK_SUBPASS_CONTENTS_INLINE);
+    std::array<VkClearAttachment, 2> clears{};
+    clears[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    clears[0].clearValue.color = {{38.f / 255.f, 29.f / 255.f, 23.f / 255.f, 1.f}};
+    clears[1].aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    clears[1].clearValue.depthStencil = {0.f, 0u};
+    const VkClearRect whole{{{0, 0}, target_extent}, 0u, 1u};
+    vkCmdClearAttachments(commands, 2u, clears.data(), 1u, &whole);
+    for (const auto &draw : secondary_map_draws) {
+        const auto &state = draw.state;
+        vkCmdSetViewport(commands, 0u, 1u, &state.viewport);
+        vkCmdSetScissor(commands, 0u, 1u, &state.scissor);
+        vkCmdSetBlendConstants(commands, state.blend.data());
+        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, state.pipeline);
+        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0u, 1u,
+            &state.texture, 0u, nullptr);
+        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 1u, 1u,
+            &lighting_descriptor, static_cast<std::uint32_t>(state.lighting.size()), state.lighting.data());
+        vkCmdPushConstants(commands, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0u, sizeof(PushConstants), &state.push);
+        vkCmdBindVertexBuffers(commands, 0u, 1u, &vertex_buffer, &draw.vertex_base);
+        if (draw.index_buffer != VK_NULL_HANDLE) {
+            vkCmdBindIndexBuffer(commands, draw.index_buffer, draw.index_base, VK_INDEX_TYPE_UINT16);
+            vkCmdDrawIndexed(commands, draw.count, 1u, 0u, 0, draw.raw ? static_cast<std::uint32_t>(draw.vertex_base) : 0u);
+        } else {
+            vkCmdDraw(commands, draw.count, 1u, 0u, 0u);
+        }
+    }
+    vkCmdEndRenderPass(commands);
+    transition(commands, secondary_map_target.color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    const VkRect2D rect = second_screen_map_rect();
+    if (rect.extent.width == 0u || rect.extent.height == 0u) return;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(rect.extent.width) * rect.extent.height * 4u;
+    if (map_buffer == VK_NULL_HANDLE || bytes > map_buffer_bytes) {
+        destroy_second_screen_readback();
+        VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buffer_info.size = bytes;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (vkCreateBuffer(device, &buffer_info, nullptr, &map_buffer) != VK_SUCCESS) {
+            map_buffer = VK_NULL_HANDLE;
+            return;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device, map_buffer, &requirements);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = find_memory_type(requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device, &allocate, nullptr, &map_memory) != VK_SUCCESS) {
+            destroy_second_screen_readback();
+            return;
+        }
+        vkBindBufferMemory(device, map_buffer, map_memory, 0u);
+        map_buffer_bytes = bytes;
+    }
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+    copy.imageOffset = {rect.offset.x, rect.offset.y, 0};
+    copy.imageExtent = {rect.extent.width, rect.extent.height, 1u};
+    vkCmdCopyImageToBuffer(commands, secondary_map_target.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, map_buffer, 1u, &copy);
+    map_extent = rect.extent;
+    map_copy_pending = true;
+    map_copy_fence = VK_NULL_HANDLE;
+}
+
+void VulkanRenderer::Impl::finish_second_screen_map(VkFence fence) {
+    if (!map_copy_pending || map_memory == VK_NULL_HANDLE || fence == VK_NULL_HANDLE) return;
+    // No wait: the map changes slowly, so a frame that is still running leaves
+    // the image already on the lower screen in place.
+    if (vkWaitForFences(device, 1u, &fence, VK_TRUE, 0u) != VK_SUCCESS) return;
+    void *mapped = nullptr;
+    if (vkMapMemory(device, map_memory, 0u, map_buffer_bytes, 0u, &mapped) != VK_SUCCESS) return;
+    // The game's targets are RGBA8, so the bytes go out in that order.
+    android::set_second_screen_map(static_cast<const std::uint8_t *>(mapped),
+        static_cast<int>(map_extent.width), static_cast<int>(map_extent.height), false);
+    vkUnmapMemory(device, map_memory);
+    map_copy_pending = false;
+    map_copy_fence = VK_NULL_HANDLE;
+}
+
+void VulkanRenderer::Impl::destroy_second_screen_map() {
+    destroy_target(secondary_map_target);
+    secondary_map_target = {};
+    secondary_map_draws.clear();
+    destroy_second_screen_readback();
+}
+
+void VulkanRenderer::Impl::destroy_second_screen_readback() {
+    if (map_buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, map_buffer, nullptr);
+    if (map_memory != VK_NULL_HANDLE) vkFreeMemory(device, map_memory, nullptr);
+    map_buffer = VK_NULL_HANDLE;
+    map_memory = VK_NULL_HANDLE;
+    map_buffer_bytes = 0u;
+    map_copy_pending = false;
+}
+#endif
+
 // Finishes the frame being recorded: the game frame (or a plain background
 // when `source` is null), the performance overlay on game frames, the
 // interface, then submit and present.
@@ -4112,6 +4304,10 @@ void VulkanRenderer::Impl::submit_and_present(
     }
     if (main_frame) recording = false;
     if (capture) write_capture(fence);
+#if defined(MHP3RD_ANDROID_APP)
+    if (map_copy_pending && map_copy_fence == VK_NULL_HANDLE) map_copy_fence = fence;
+    if (map_copy_pending) finish_second_screen_map(map_copy_fence);
+#endif
 }
 
 // Writes the image copied by submit_and_present once its frame has finished.
@@ -6386,6 +6582,7 @@ void VulkanRenderer::Impl::sample_pad(bool focused) {
     static const bool at_flip = std::getenv("MHP3RD_PAD_AT_FLIP") != nullptr;
     const bool advance = impl_->game_read || at_flip;
     pad.buttons = impl_->lead_in.apply(pad.buttons, impl_->lead_request, advance);
+
     if (impl_->touch_visible && Impl::adaptive_layout())
         pad.buttons |= impl_->adaptive_touch.sample_item_buttons(advance);
 
@@ -6663,6 +6860,9 @@ void VulkanRenderer::Impl::resize_targets(VkExtent2D extent) {
     // targets the game reads back, stay intact.
     vkDeviceWaitIdle(device);
     // A held frame has the old size; let the game's own frames show again.
+#if defined(MHP3RD_ANDROID_APP)
+    destroy_second_screen_map();
+#endif
     if (holding) {
         holding = false;
         destroy_target(held);
@@ -6987,6 +7187,9 @@ void VulkanRenderer::present_ui(bool show_game) {
 void VulkanRenderer::begin_frame() {
     Impl &impl = *impl_;
     if (!impl.ready || impl.recording) return;
+#if defined(MHP3RD_ANDROID_APP)
+    impl.secondary_map_draws.clear();
+#endif
     if (impl.health->compat_wanted.load(std::memory_order_relaxed)) impl.apply_compat_request();
     // The next slot: its fence is the frame slot_count frames back.
     impl.slot = (impl.slot + 1u) % impl.slot_count;
@@ -6996,6 +7199,10 @@ void VulkanRenderer::begin_frame() {
     impl.frame_uploads = frame.uploads;
     const perf::Clock::time_point wait_start = perf::Clock::now();
     impl.wait_fence(impl.frame_fence, "the wait for a frame two back");
+#if defined(MHP3RD_ANDROID_APP)
+    if (impl.map_copy_pending && impl.map_copy_fence == impl.frame_fence)
+        impl.finish_second_screen_map(impl.frame_fence);
+#endif
     perf::add_wait_time(perf::Clock::now() - wait_start, perf::Stall::Fence);
     vkResetFences(impl.device, 1u, &impl.frame_fence);
     impl.release_frame_uploads(impl.slot);
@@ -7692,7 +7899,18 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     }
 
     static const bool no_merge_env = std::getenv("MHP3RD_NO_DRAW_MERGE") != nullptr;
-    const bool merge = !no_merge_env && !perf::alternate_off(perf::NewPath::Merge);
+    bool merge = !no_merge_env && !perf::alternate_off(perf::NewPath::Merge);
+#if defined(MHP3RD_ANDROID_APP)
+    const bool lower_map_draw = call.through && !call.clear_mode && impl.shows(call.target.color_address) &&
+        hud::part(call.command_address, call.call_return) == hud::Part::Map && android::second_screen_wanted();
+    if (lower_map_draw) merge = false;
+    static const bool map_disabled = std::getenv("MHP3RD_NO_SECONDARY_MAP") != nullptr;
+    static const bool mirror_map = std::getenv("MHP3RD_KEEP_MAIN_MAP") != nullptr;
+    const bool hide_main_map = secondary_map::hide_main(
+        lower_map_draw, !map_disabled, mirror_map, hud::Part::Map);
+#else
+    constexpr bool hide_main_map = false;
+#endif
     // A skinned draw recorded for drawing again keeps a copy of its vertices,
     // to blend them with the next frame's; ge_state.cpp skins exactly the
     // transformed vertices whose type has weights.
@@ -8066,19 +8284,31 @@ void VulkanRenderer::submit(const DrawCall &call, const GuestMemory &memory) {
     vkCmdPushConstants(impl.command_buffer, impl.pipeline_layout,
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
     vkCmdBindVertexBuffers(impl.command_buffer, 0u, 1u, &impl.vertex_buffer, &vertex_start);
-    if (direct) {
+    if (!hide_main_map && direct) {
         vkCmdBindIndexBuffer(impl.command_buffer, impl.vertex_buffer, index_start, VK_INDEX_TYPE_UINT16);
         vkCmdDrawIndexed(
             impl.command_buffer, draw_count, 1u, 0u, 0, raw ? static_cast<std::uint32_t>(vertex_start) : 0u);
-    } else {
+    } else if (!hide_main_map) {
         vkCmdDraw(impl.command_buffer, draw_count, 1u, 0u, 0u);
     }
-    if (impl.interpolating) {
+    if (impl.interpolating && !hide_main_map) {
         const Impl::DrawState state{
             pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor, blend_constants, push};
         impl.record_draw_for_replay(call, lit, skinned_first, state, vertex_start,
             direct ? impl.vertex_buffer : VK_NULL_HANDLE, index_start, draw_count, drawn_vertices, false, raw);
     }
+#if defined(MHP3RD_ANDROID_APP)
+    if (lower_map_draw) {
+        Impl::ReplayGroup draw{};
+        draw.state = {pipeline, texture_descriptor, lighting_offsets, vk_viewport, vk_scissor, blend_constants, push};
+        draw.vertex_base = vertex_start;
+        draw.index_buffer = direct ? impl.vertex_buffer : VK_NULL_HANDLE;
+        draw.index_base = index_start;
+        draw.count = draw_count;
+        draw.raw = raw;
+        impl.secondary_map_draws.push_back(draw);
+    }
+#endif
     impl.vertex_offset = draw_end;
     ++impl.draws;
     perf::count_draw();
@@ -8358,6 +8588,10 @@ void VulkanRenderer::Impl::submit_frame() {
     submit.pCommandBuffers = batch.data();
     const perf::Clock::time_point submit_start = perf::Clock::now();
     if (vkQueueSubmit(queue, 1u, &submit, frame_fence) == VK_ERROR_DEVICE_LOST) device_lost("a frame's submit");
+#if defined(MHP3RD_ANDROID_APP)
+    if (map_copy_pending && map_copy_fence == VK_NULL_HANDLE) map_copy_fence = frame_fence;
+    if (map_copy_pending) finish_second_screen_map(map_copy_fence);
+#endif
     perf::add_wait_time(perf::Clock::now() - submit_start, perf::Stall::Submit);
     recording = false;
 }
@@ -8486,6 +8720,9 @@ bool VulkanRenderer::Impl::present_between(const pacing::PresentClock::Present &
     VkFence fence = present_fences[slot];
     const perf::Clock::time_point wait_start = perf::Clock::now();
     wait_fence(fence, "the wait for a present slot");
+#if defined(MHP3RD_ANDROID_APP)
+    if (map_copy_pending && map_copy_fence == fence) finish_second_screen_map(fence);
+#endif
     Clock::duration waited = perf::Clock::now() - wait_start;
     perf::add_wait_time(waited, perf::Stall::Fence);
     if (present_timed[slot]) {
@@ -9053,6 +9290,9 @@ bool VulkanRenderer::present(
     impl.end_pass();
 
     static const bool trace3d = std::getenv("MHP3RD_TRACE_3D") != nullptr;
+#if defined(MHP3RD_ANDROID_APP)
+    impl.render_second_screen_map(impl.command_buffer);
+#endif
     static const bool trace_camera = std::getenv("MHP3RD_TRACE_CAMERA") != nullptr;
     // The camera hunt reads the same measurement without printing it.
     static const bool watch_camera = trace_camera || std::getenv("MHP3RD_FIND_CAMERA") != nullptr;
@@ -9502,6 +9742,9 @@ void VulkanRenderer::shutdown() {
     vkDestroyShaderModule(impl.device, impl.plain_alpha_free_fragment_shader, nullptr);
     for (auto &[address, target] : impl.targets) impl.destroy_target(target);
     impl.targets.clear();
+#if defined(MHP3RD_ANDROID_APP)
+    impl.destroy_second_screen_map();
+#endif
     impl.destroy_target(impl.held);
     impl.held = {};
     impl.holding = false;

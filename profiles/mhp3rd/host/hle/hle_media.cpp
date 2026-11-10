@@ -11,6 +11,10 @@
 #include "game/guest_ram.hpp"
 #include "game/audio_settings.hpp"
 #include "game/weapon_state.hpp"
+#include "game/secondary_items.hpp"
+#if defined(MHP3RD_ANDROID_APP)
+#include "game/secondary_map.hpp"
+#endif
 #include "game/control_context.hpp"
 #include "game/layered_armor.hpp"
 #include "platform/utf8_path.hpp"
@@ -470,6 +474,9 @@ void present_frame(Runtime &rt) {
     // presents. Shared by adaptive controls and future appearance features.
     game::weapon::refresh(game::GuestRam(rt.memory()));
     game::control_context::refresh(game::GuestRam(rt.memory()));
+#if defined(MHP3RD_ANDROID_APP)
+    game::secondary_map::frame(rt);
+#endif
     game::sound::trace(game::GuestRam(rt.memory()));
     // Layered armor puts its wrappers in place here, between two frames.
     game::layered::frame(rt);
@@ -633,6 +640,9 @@ void register_display_ctrl(HleRegistrar &hle) {
         media().display.buffer_width = arg(ctx, 1);
         media().display.pixel_format = arg(ctx, 2);
         present_frame(rt);
+#if defined(MHP3RD_ANDROID_APP)
+        if (game::secondary_items::frame(rt, ctx)) return;
+#endif
         kernel().finish(ctx, 0u);
     });
 

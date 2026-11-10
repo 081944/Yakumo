@@ -55,8 +55,9 @@ if(MHP3RD_GENERATED)
 
     # Hiding the HUD (host/gpu/game_hud.cpp) wraps the game's 2D functions the
     # same way, so their units are read from the corpus too, in one pass.
+    # The secondary map also wraps the base inventory query at its map caller.
     set(MHP3RD_HUD_FUNCTIONS
-        08876874 088EA9B0 088EB07C 088EBF0C 088EC060 088EC0F8 088EC1F0 088EC2EC 088EC3E0
+        0886FB5C 08876874 088EA9B0 088EB07C 088EBF0C 088EC060 088EC0F8 088EC1F0 088EC2EC 088EC3E0
         088EC63C 088ECB74 088ECC38 088ECCE4 088ECD9C 088ECE58)
     list(JOIN MHP3RD_HUD_FUNCTIONS "|" hud_pattern)
     set(hud_lines "")
@@ -277,6 +278,8 @@ set(MHP3RD_HOST_SOURCES
     host/game/game_data.cpp
     host/game/equipment_models.cpp
     host/game/weapon_state.cpp
+    host/game/secondary_items.cpp
+    host/game/item_icon_source.cpp
     host/game/control_context.cpp
     host/game/layered_armor.cpp
     host/game/layered_armor_hook.cpp
@@ -311,7 +314,7 @@ set(MHP3RD_PROGRAM_SOURCES
 if(MHP3RD_ANDROID_APP)
     add_library(Yakumo SHARED ${MHP3RD_PROGRAM_SOURCES} host/platform/android_app.cpp
         host/platform/android_jni.cpp host/platform/android_documents.cpp host/platform/android_performance.cpp
-        host/platform/android_fatal.cpp)
+        host/platform/android_secondary_screen.cpp host/platform/android_fatal.cpp host/game/secondary_map.cpp)
     target_sources(Yakumo PRIVATE host/platform/android_display.cpp)
     target_compile_definitions(Yakumo PRIVATE MHP3RD_ANDROID_APP=1)
     set_target_properties(Yakumo PROPERTIES
@@ -798,6 +801,28 @@ target_include_directories(mhp3rd_weapon_state_tests PRIVATE "${MHP3RD_PROFILE_D
 set_target_properties(mhp3rd_weapon_state_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 if(PSPRECOMP_BUILD_TESTS)
     add_test(NAME mhp3rd_weapon_state_tests COMMAND mhp3rd_weapon_state_tests)
+endif()
+
+add_executable(mhp3rd_secondary_items_tests tests/secondary_items_tests.cpp
+    host/game/secondary_items.cpp host/game/control_context.cpp)
+target_include_directories(mhp3rd_secondary_items_tests PRIVATE "${MHP3RD_PROFILE_DIR}/host")
+set_target_properties(mhp3rd_secondary_items_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mhp3rd_secondary_items_tests COMMAND mhp3rd_secondary_items_tests)
+endif()
+
+add_executable(mhp3rd_secondary_map_policy_tests tests/secondary_map_policy_tests.cpp)
+target_include_directories(mhp3rd_secondary_map_policy_tests PRIVATE "${MHP3RD_PROFILE_DIR}/host")
+set_target_properties(mhp3rd_secondary_map_policy_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mhp3rd_secondary_map_policy_tests COMMAND mhp3rd_secondary_map_policy_tests)
+endif()
+
+add_executable(mhp3rd_item_icon_source_tests tests/item_icon_source_tests.cpp host/game/item_icon_source.cpp)
+target_include_directories(mhp3rd_item_icon_source_tests PRIVATE "${MHP3RD_PROFILE_DIR}/host")
+set_target_properties(mhp3rd_item_icon_source_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(PSPRECOMP_BUILD_TESTS)
+    add_test(NAME mhp3rd_item_icon_source_tests COMMAND mhp3rd_item_icon_source_tests)
 endif()
 
 add_executable(mhp3rd_control_context_tests tests/control_context_tests.cpp host/game/control_context.cpp)

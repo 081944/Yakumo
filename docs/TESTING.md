@@ -2,6 +2,41 @@
 
 ## Automated
 
+- **Secondary-screen pouch snapshots** (`mhp3rd_secondary_items_tests`) use
+  synthetic guest memory to check local actor identity, live slot metadata,
+  last-slot selection, empty slots, missing/unloaded records, invalid pointers,
+  menus, capacity bounds and invalid item/count values. Native Android guest
+  calls and the Vulkan readback require device checks: cold start, resume,
+  quest entry/exit, rapid Previous/Next taps without consumption, grid selection
+  and explicit Use, including refused use and empty inventory. Snapshot coverage
+  does not measure guest callback execution or Android lifecycle behavior.
+
+- **Secondary map continuity** (`mhp3rd_secondary_map_policy_tests`) checks
+  retained content across intermediate and empty original frames, clearing at
+  scene exit, and Map-only routing with display availability and opt-out flags.
+  On Android, verify the lower map continuously during a quest and confirm the
+  upper map is absent. The optional `trace_lower_map` external-files marker
+  logs missing/blank bitmap samples every 60 lower-panel refreshes; remove it
+  after a bounded capture. These samples do not measure physical panel scanout.
+  Possession bypass tests restrict it to the supported quest-map caller and
+  Map item ID, with lower-display and opt-out gates. Verify on hardware without
+  carrying a Map item and confirm no inventory quantity changes.
+
+- **Lower item scrolling** (`SecondaryItemListTest` in the Android JVM suite)
+  checks five visible rows, access to all 32 slots, fractional offsets, clamping,
+  odd counts, empty/short snapshots, invalid contacts, changed selection reveal,
+  retained manual scrolling and snapshot changes during dragging. On hardware,
+  swipe both columns, tap after scrolling and cancel/move off a cell; dragging
+  must never select or consume an item. Geometry and Android touch delivery still
+  require device checks; pure list tests do not measure those paths.
+
+- **Original item icon sources** (`mhp3rd_item_icon_source_tests`) validate
+  synthetic HMT archives, icon indirection, atlas rectangles and palette routing,
+  including missing archives, invalid links, dimensions and crop bounds. Live
+  atlas decoding and the Map-only Vulkan pass require Android visual checks.
+  Compare the main and lower screens in a quest: original icon silhouettes and
+  colours must agree, and moving scenery must never appear behind the lower map.
+
 - **Barioth encounter tools** (`mhp3rd_debug_tools_tests` and
   `scripts/ci/test_encounter_benchmark.py`) use synthetic RAM, model headers,
   observations and bounded owned child processes. They cover real quest

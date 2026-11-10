@@ -556,6 +556,35 @@ These are initial weapon profiles; complete context-sensitive combo hints
 and interaction prompts are still being developed. Actual animation transitions, touch hardware and multiplayer
 need gameplay verification.
 
+### Android secondary display (experimental)
+
+On a handheld with a presentation display, the lower screen shows the quest
+minimap and ten live pouch slots in two columns and five rows. Drag the item
+list vertically to reach additional slots, then tap to select. Dragging does
+not select or consume an item. A changed game selection scrolls into view;
+unchanged snapshots preserve manual scrolling. The minimap is rendered from
+Map-tagged HUD draws into a separate target; scene draws and main-screen
+framebuffer pixels are excluded. The map panel is shorter and aligned near the
+top. There are no Previous, Use or Next buttons on the lower display.
+Item use retains the game's ordinary controls and availability checks.
+
+Names follow the loaded game text, with Chinese labels for common consumables.
+Icons are decoded at runtime from the game's original icon atlas, rectangles
+and colour palettes. No replacement drawings or bundled extracted artwork are
+used. Untranslated item names retain their original text.
+Outside a quest, the map stays on standby and pouch actions are unavailable.
+`MHP3RD_NO_SECONDARY_ITEMS=1` disables the experimental native item bridge.
+`MHP3RD_NO_SECONDARY_MAP=1` disables the separate map pass and keeps the main map.
+With the lower display active, the main screen omits Map-tagged HUD draws.
+`MHP3RD_KEEP_MAIN_MAP=1` restores the map on both screens for comparison.
+During a quest the lower map is revealed even without a Map item. Only the
+map painter's possession query is overridden; pouch quantities remain real.
+`MHP3RD_SECONDARY_MAP_REQUIRE_ITEM=1` restores the original possession rule.
+The lower map updates only on original game flips and retains its last complete
+image through intermediate presents or temporarily missing HUD packets; leaving
+the quest clears it. Quest transitions, item-specific use
+restrictions, all languages and multiplayer still need gameplay validation.
+
 ## On-screen keyboard
 
 When the game asks for text (the hunter's name at character creation), Yakumo opens its own keyboard over the game. It works with a gamepad alone, and a physical keyboard types into it at the same time; the mouse can click its keys.
