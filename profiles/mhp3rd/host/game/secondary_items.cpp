@@ -82,19 +82,26 @@ bool frame(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
             });
         return true;
     }
-    // Grid taps select an actual pouch position; they never consume an item.
+    std::optional<unsigned> requested_slot;
+    // A grid tap selects and uses the tapped pouch position in one guest-frame
+    // transaction. This avoids waiting for a later frame, where the game could
+    // have moved the selected slot again.
     if (*request >= 100 && *request < 132) {
         const unsigned slot = static_cast<unsigned>(*request - 100);
         if (slot < snapshot->capacity && snapshot->items[slot].id && snapshot->items[slot].count &&
             (ram.load8(0x089D0FA0u + 20u * snapshot->items[slot].id + 7u) & 8u)) {
             ram.store16(actor + 3052u, static_cast<std::uint16_t>(slot));
-            std::cout << "[secondary-items] selected " << slot << std::endl;
+            requested_slot = slot;
+            std::cout << "[secondary-items] use requested slot " << slot << std::endl;
         }
-        return false;
+        if (!requested_slot) return false;
     }
-    if (*request != 0 || (ram.load32(actor + 636u) & 8u) || ram.load8(actor + 396u) != 0u ||
+    if ((ram.load32(actor + 636u) & 8u) || ram.load8(actor + 396u) != 0u ||
         ram.load8(actor + 397u) != 0u) return false;
-    const auto &item = snapshot->items[snapshot->selected];
+    if (!requested_slot && *request != 0) return false;
+    const unsigned slot = requested_slot.value_or(snapshot->selected);
+    if (slot >= snapshot->capacity) return false;
+    const auto &item = snapshot->items[slot];
     if (!item.id || !item.count) return false;
     const auto uid = kernel().allocate_block("secondary-item-command", 0u, 64u, 0u);
     const auto *block = kernel().find_block(uid);
@@ -103,7 +110,7 @@ bool frame(psprecomp::Runtime &runtime, psprecomp::AllegrexContext &ctx) {
     for (unsigned i = 0; i < 64u; ++i) ram.store8(scratch + i, 0u);
     ram.store16(scratch + 8u, 0xFFFFu);
     ctx.gpr[8] = scratch + 16u;
-    ctx.gpr[9] = snapshot->selected;
+    ctx.gpr[9] = slot;
     ctx.gpr[10] = scratch + 8u;
     // Original dispatcher: resolve the selected pouch slot, then submit the
     // returned action through the game's own transition routine. No pad bits.

@@ -20,13 +20,13 @@ import android.view.ViewConfiguration;
 import java.nio.ByteBuffer;
 
 /**
- * The lower screen of a two-screen handheld: the quest map on the left, the
- * item shortcuts on the right.
+ * The lower screen of a two-screen handheld: the quest map and three item
+ * shortcuts on the left, and the full item pouch on the right.
  *
  * <p>The renderer replays only Map-tagged HUD draws into an independent target.
  * This view displays that map bitmap; no main-screen scene pixels are copied.
- * Item slots mirror the live pouch; taps
- * queue native selection/use requests for the guest thread, without pad input.
+ * Item slots mirror the live pouch; taps queue native use requests for the
+ * guest thread, without pad input.
  *
  * <p>The native side lives in libmain.so, which SDLActivity has already
  * loaded, so the methods below bind to it without a loadLibrary call.
@@ -108,7 +108,7 @@ public final class SecondaryScreen {
     private static native void nativeForceMap(boolean forced);
 
     /**
-     * The panel: map on the left, item shortcuts on the right. Sizes are all
+     * The panel: map and three item shortcuts on the left, full item pouch on the right. Sizes are all
      * fractions of the panel, so the same layout fits a 1240x1080 lower screen
      * and anything else a device reports.
      */
@@ -190,6 +190,9 @@ public final class SecondaryScreen {
         }
 
         private final RectF mapPanel = new RectF();
+        private final RectF itemShortcuts = new RectF();
+        private final RectF[] shortcutButtons = {new RectF(), new RectF(), new RectF()};
+        private final int[] shortcutItemSlots = {-1, -1, -1};
         private final RectF itemViewport = new RectF();
         private final RectF[] slots = new RectF[SecondaryItemList.CAPACITY];
 
@@ -275,7 +278,11 @@ public final class SecondaryScreen {
             super.onSizeChanged(w, h, oldw, oldh);
             float pad = h * 0.035f;
             float mapW = w * 0.60f - pad * 1.5f;
-            mapPanel.set(pad, pad * 0.65f, pad + mapW, h * 0.81f);
+            float shortcutGap = pad * 0.45f;
+            float shortcutHeight = Math.max(h * 0.12f, pad * 1.5f);
+            float mapBottom = h - pad - shortcutGap - shortcutHeight;
+            mapPanel.set(pad, pad * 0.65f, pad + mapW, mapBottom);
+            itemShortcuts.set(pad, mapBottom + shortcutGap, pad + mapW, h - pad);
             float left = mapPanel.right + pad;
             float right = w - pad;
             float gap = (right - left) * 0.05f;
@@ -335,7 +342,52 @@ public final class SecondaryScreen {
             paint.setColor(EDGE);
             c.drawRoundRect(rect, radius, radius, paint);
 
+            drawItemShortcuts(c);
             drawItems(c);
+        }
+
+        private void drawItemShortcuts(Canvas c) {
+            for (int i = 0; i < shortcutItemSlots.length; ++i) shortcutItemSlots[i] = -1;
+            int shortcut = 0;
+            if (itemState != null) {
+                for (int slot = 0; slot < SecondaryItemList.CAPACITY && shortcut < shortcutItemSlots.length; ++slot) {
+                    if (slot + 1 >= itemState.length || itemState[slot + 1] == null
+                            || itemState[slot + 1].isEmpty()) continue;
+                    shortcutItemSlots[shortcut++] = slot;
+                }
+            }
+            float gap = itemShortcuts.width() * 0.035f;
+            float width = (itemShortcuts.width() - gap * 2f) / shortcutButtons.length;
+            for (int i = 0; i < shortcutButtons.length; ++i) {
+                RectF button = shortcutButtons[i];
+                float left = itemShortcuts.left + i * (width + gap);
+                button.set(left, itemShortcuts.top, left + width, itemShortcuts.bottom);
+                float radius = button.height() * 0.16f;
+                paint.setStyle(Paint.Style.FILL);
+                int slot = shortcutItemSlots[i];
+                boolean occupied = slot >= 0;
+                boolean selected = occupied && slot == selectedSlot;
+                boolean pressed = occupied && pressedAction == SecondaryItemActions.forSlot(slot);
+                paint.setColor(pressed || selected ? Color.rgb(70, 56, 34) : Color.rgb(30, 24, 19));
+                c.drawRoundRect(button, radius, radius, paint);
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(2f, button.height() * 0.025f));
+                paint.setColor(selected ? Color.rgb(226, 178, 84) : EDGE);
+                c.drawRoundRect(button, radius, radius, paint);
+                if (!occupied) continue;
+                String[] fields = itemState[slot + 1].split("\t", 4);
+                if (fields.length != 4) continue;
+                String name = chineseItemName(fields[3]);
+                drawItemIcon(c, button, Integer.parseInt(fields[1]), Integer.parseInt(fields[2]), name);
+                text.setColor(INK);
+                text.setTextSize(Math.min(button.width(), button.height()) * 0.14f);
+                String count = "x" + fields[0];
+                c.drawText(count, button.right - text.measureText(count) - button.width() * 0.08f,
+                        button.top + button.height() * 0.20f, text);
+                text.setTextSize(Math.min(button.width(), button.height()) * 0.16f);
+                c.drawText(String.valueOf(slot + 1), button.left + button.width() * 0.08f,
+                        button.top + button.height() * 0.20f, text);
+            }
         }
 
         private void drawItems(Canvas c) {
@@ -504,13 +556,17 @@ public final class SecondaryScreen {
         }
 
         private int actionAt(float x, float y) {
+            for (int i = 0; i < shortcutButtons.length; ++i) {
+                if (shortcutButtons[i].contains(x, y) && shortcutItemSlots[i] >= 0)
+                    return SecondaryItemActions.forSlot(shortcutItemSlots[i]);
+            }
             if (itemViewport.contains(x, y) && rowStride > 0 && columnStride > 0) {
                 int slot = itemList.hit((x - itemViewport.left) / columnStride,
                         (y - itemViewport.top) / rowStride);
                 updateSlotBounds();
                 if (slot >= 0 && slots[slot].contains(x, y) && itemState != null
                         && slot + 1 < itemState.length && itemState[slot + 1] != null
-                        && !itemState[slot + 1].isEmpty()) return 100 + slot;
+                        && !itemState[slot + 1].isEmpty()) return SecondaryItemActions.forSlot(slot);
             }
             return Integer.MIN_VALUE;
         }

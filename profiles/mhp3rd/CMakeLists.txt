@@ -102,6 +102,7 @@ set(MHP3RD_RENDERER_SOURCES)
 if(MHP3RD_RENDERER)
     find_package(SDL3 QUIET)
     find_package(Vulkan QUIET)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     find_program(MHP3RD_GLSLANG NAMES glslangValidator glslang)
     if(SDL3_FOUND AND Vulkan_FOUND AND MHP3RD_GLSLANG)
         set(MHP3RD_SHADER_INC "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders/ge_shaders.inc")
@@ -124,7 +125,7 @@ if(MHP3RD_RENDERER)
         add_custom_command(
             OUTPUT "${MHP3RD_SHADER_INC}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
-            COMMAND python3 "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py" "${MHP3RD_GLSLANG}" "${MHP3RD_SHADER_INC}"
+            COMMAND "${Python3_EXECUTABLE}" "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py" "${MHP3RD_GLSLANG}" "${MHP3RD_SHADER_INC}"
                     ${MHP3RD_SHADERS}
             DEPENDS ${MHP3RD_SHADER_SOURCES}
                     "${MHP3RD_PROFILE_DIR}/tools/embed_shaders.py"

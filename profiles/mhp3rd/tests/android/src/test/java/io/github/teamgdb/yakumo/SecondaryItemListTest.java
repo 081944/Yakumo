@@ -4,6 +4,13 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class SecondaryItemListTest {
+    @Test public void lowerScreenShortcutUsesThePouchSlot() {
+        assertEquals(100, SecondaryItemActions.forSlot(0));
+        assertEquals(131, SecondaryItemActions.forSlot(31));
+        assertEquals(Integer.MIN_VALUE, SecondaryItemActions.forSlot(-1));
+        assertEquals(Integer.MIN_VALUE, SecondaryItemActions.forSlot(32));
+    }
+
     private String[] pouch(int count) {
         String[] items = new String[count + 1];
         for (int i = 1; i <= count; ++i) items[i] = "1\t1\t1\titem";

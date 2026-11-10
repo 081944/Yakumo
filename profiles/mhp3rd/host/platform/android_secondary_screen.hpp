@@ -27,7 +27,7 @@ void clear_second_screen_map();
 
 // An item shortcut the player tapped, as an index into the item bar: -1 for
 // the previous item, 1 for the next, 0 for "use what is selected". Empty when
-// nothing is waiting. Values 100..131 select the corresponding pouch slot.
+// nothing is waiting. Values 100..131 use the corresponding pouch slot.
 // Read once per original game frame by the display import.
 std::optional<int> take_second_screen_item_request();
 
