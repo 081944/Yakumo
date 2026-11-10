@@ -18,6 +18,10 @@ cmake-build-*/
 *.ipdb
 *.res
 *.tlog
+*.apk
+*.aab
+*.apks
+*.idsig
 
 # Copyrighted game data.  Never publish: the PSP executable, its decrypted ELF
 # and save data are the user's own dumped media, not part of this source tree.
